@@ -1,12 +1,20 @@
+import os
+import warnings
 import streamlit as st
 import re
 import nltk
 from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
-from fuzzywuzzy import fuzz
+from rapidfuzz import fuzz
 import logging
 from nltk.corpus import stopwords
 from transformers import pipeline
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -48,16 +56,20 @@ clinical_terms_english = [
 clinical_terms_english = [term.lower() for term in clinical_terms_english]  # Convert to lowercase
 
 # --- Load NMT Models ---
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def load_nmt_models():
     """Loads NMT models for translation."""
     logging.info("Loading NMT models...")
-    translator_es = pipeline('translation', model='Helsinki-NLP/opus-mt-en-es')  # English to Spanish
-    translator_es_ca = pipeline('translation', model='Helsinki-NLP/opus-mt-es-ca')  # Spanish to Catalan
-    logging.info("NMT models loaded.")
-    return translator_es, translator_es_ca
+    try:
+        translator_es = pipeline('translation', model='Helsinki-NLP/opus-mt-en-es', device=-1)  # English to Spanish
+        translator_es_ca = pipeline('translation', model='Helsinki-NLP/opus-mt-es-ca', device=-1)  # Spanish to Catalan
+        logging.info("NMT models loaded.")
+        return translator_es, translator_es_ca
+    except Exception as exc:
+        logging.warning("Could not load NMT models: %s", exc)
+        return None, None
 
-translator_es, translator_es_ca = load_nmt_models()  # Load models at startup
+translator_es, translator_es_ca = None, None
 
 # --- Functions ---
 def replace_multi_word_terms(text, replacements):
@@ -66,6 +78,13 @@ def replace_multi_word_terms(text, replacements):
         pattern = r'\b' + re.escape(phrase) + r'\b'  # Word boundary matching
         text = re.sub(pattern, token, text)
     return text
+
+def tokenize_text(text):
+    """Tokenizes input text using NLTK when available and falls back to regex if needed."""
+    try:
+        return word_tokenize(text)
+    except LookupError:
+        return re.findall(r"\b[\w']+\b", text.lower())
 
 def find_closest_match(term, term_list, threshold=70, use_partial=True):
     """Finds the closest match in a list of terms using fuzzy matching."""
@@ -120,7 +139,7 @@ def identify_and_translate(sentence, clinical_terms, lemmatizer, fuzzy_threshold
     }
     sentence = replace_multi_word_terms(sentence, replacements)
 
-    tokens = word_tokenize(sentence)
+    tokens = tokenize_text(sentence)
 
     # Remove stop words
     stop_words = set(stopwords.words('english'))
@@ -166,7 +185,7 @@ def evaluate_accuracy(sentence, clinical_terms, lemmatizer, true_labels, fuzzy_t
     }
     sentence = replace_multi_word_terms(sentence, replacements)
 
-    tokens = word_tokenize(sentence)
+    tokens = tokenize_text(sentence)
 
     # Remove stop words
     stop_words = set(stopwords.words('english'))
@@ -208,6 +227,7 @@ def main():
 
     if st.button("Analyze"):
         lemmatizer = WordNetLemmatizer()
+        translator_es, translator_es_ca = load_nmt_models()
         results = identify_and_translate(user_sentence, clinical_terms_english, lemmatizer, fuzzy_threshold=fuzzy_threshold, translator_es=translator_es, translator_es_ca=translator_es_ca)
 
         st.subheader("Results:")
@@ -253,7 +273,10 @@ def main():
             evaluate_accuracy(user_sentence, clinical_terms_english, lemmatizer, true_labels, fuzzy_threshold)
 
 if __name__ == '__main__':
-    nltk.download('punkt')
-    nltk.download('wordnet')
-    nltk.download('stopwords')
+    try:
+        nltk.download('punkt', quiet=True)
+        nltk.download('wordnet', quiet=True)
+        nltk.download('stopwords', quiet=True)
+    except Exception:
+        pass
     main()
